@@ -24,16 +24,11 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-)
 
-import (
 	"github.com/pkg/errors"
-
 	"golang.org/x/crypto/blake2b"
-)
 
-import (
-	"github.com/dubbogo/gost/strings"
+	gxstrings "github.com/dubbogo/gost/strings"
 )
 
 const (
@@ -158,6 +153,37 @@ func (c *Consistent) Add(host string) {
 	c.add(host)
 }
 
+// AddBatch adds hosts in input order, skipping existing hosts and preserving their loads.
+// Hash collisions follow the same ownership rules as sequential Add calls.
+// It holds the write lock for the entire batch and sorts at most once.
+// An empty or nil slice is a no-op.
+func (c *Consistent) AddBatch(hosts []string) {
+	if len(hosts) == 0 {
+		return
+	}
+	c.Lock()
+	defer c.Unlock()
+
+	c.addBatch(hosts)
+}
+
+func (c *Consistent) addBatch(hosts []string) {
+	changed := false
+	for _, host := range hosts {
+		if _, exists := c.loadMap[host]; exists {
+			continue
+		}
+		c.loadMap[host] = &Host{Name: host}
+		for i := uint32(0); i < c.replicaFactor; i++ {
+			h := c.Hash(c.eltKey(host, int(i)))
+			c.circle[h] = host
+		}
+		changed = true
+	}
+	if changed {
+		c.updateSortedHashes()
+	}
+}
 func (c *Consistent) add(host string) {
 	if _, ok := c.loadMap[host]; ok {
 		return
