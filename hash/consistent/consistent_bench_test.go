@@ -45,15 +45,58 @@ func BenchmarkFullBuild(b *testing.B) {
 						benchmarkRingHash = ring
 					}
 				})
-				b.Run("AddBatch", func(b *testing.B) {
-					b.ReportAllocs()
-					for b.Loop() {
-						ring := NewConsistentHash(WithReplicaNum(replicaCount))
-						ring.AddBatch(hosts)
-						benchmarkRingHash = ring
-					}
-				})
+				for _, variant := range batchVariants {
+					b.Run(variant.name, func(b *testing.B) {
+						b.ReportAllocs()
+						for b.Loop() {
+							ring := NewConsistentHash(WithReplicaNum(replicaCount))
+							variant.add(ring, hosts)
+							benchmarkRingHash = ring
+						}
+					})
+				}
 			})
+		}
+	}
+}
+
+// BenchmarkBatchAppend excludes rebuilding the initial ring from time and
+// allocation metrics. Every iteration starts with the same logical state.
+func BenchmarkBatchAppend(b *testing.B) {
+	for _, existing := range []int{256, 1024} {
+		for _, replicas := range []int{10, 100} {
+			initial := make([]string, existing)
+			for i := range initial {
+				initial[i] = fmt.Sprintf("existing-%d", i)
+			}
+			for _, count := range []int{1, 32, 256} {
+				for _, duplicates := range []bool{false, true} {
+					hosts := make([]string, count)
+					for i := range hosts {
+						if duplicates {
+							hosts[i] = initial[i]
+						} else {
+							hosts[i] = fmt.Sprintf("new-%d", i)
+						}
+					}
+					name := fmt.Sprintf("existing=%d/replicas=%d/batch=%d/duplicates=%t", existing, replicas, count, duplicates)
+					b.Run(name, func(b *testing.B) {
+						for _, variant := range batchVariants {
+							b.Run(variant.name, func(b *testing.B) {
+								b.ReportAllocs()
+								for b.Loop() {
+									b.StopTimer()
+									ring := NewConsistentHash(WithReplicaNum(replicas))
+									ring.AddBatch(initial)
+									b.StartTimer()
+									variant.add(ring, hosts)
+									benchmarkRingHash = ring
+								}
+							})
+						}
+					})
+				}
+			}
 		}
 	}
 }

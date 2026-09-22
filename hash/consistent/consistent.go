@@ -164,7 +164,7 @@ func (c *Consistent) AddBatch(hosts []string) {
 	c.Lock()
 	defer c.Unlock()
 
-	c.addBatch(hosts)
+	c.addBatchMerge(hosts)
 }
 
 func (c *Consistent) addBatch(hosts []string) {
@@ -184,6 +184,52 @@ func (c *Consistent) addBatch(hosts []string) {
 		c.updateSortedHashes()
 	}
 }
+
+// addBatchMerge sorts only new positions and merges them with the existing index.
+// The caller must hold the write lock and the existing index must match circle.
+func (c *Consistent) addBatchMerge(hosts []string) {
+	var added hashArray
+	for _, host := range hosts {
+		if _, exists := c.loadMap[host]; exists {
+			continue
+		}
+		c.loadMap[host] = &Host{Name: host}
+		for i := uint32(0); i < c.replicaFactor; i++ {
+			h := c.Hash(c.eltKey(host, int(i)))
+			if _, exists := c.circle[h]; !exists {
+				added = append(added, h)
+			}
+			// Publish each position immediately to deduplicate within this batch,
+			// while preserving sequential Add's last-new-host-wins ownership.
+			c.circle[h] = host
+		}
+	}
+	if len(added) == 0 {
+		return
+	}
+	sort.Sort(added)
+	old := c.sortedHashes
+	if len(old) == 0 {
+		c.sortedHashes = added
+		return
+	}
+	// Use a separate array so writes cannot overwrite unread old positions.
+	merged := make(hashArray, 0, len(old)+len(added))
+	i, j := 0, 0
+	for i < len(old) && j < len(added) {
+		if old[i] < added[j] {
+			merged = append(merged, old[i])
+			i++
+		} else {
+			merged = append(merged, added[j])
+			j++
+		}
+	}
+	merged = append(merged, old[i:]...)
+	merged = append(merged, added[j:]...)
+	c.sortedHashes = merged
+}
+
 func (c *Consistent) add(host string) {
 	if _, ok := c.loadMap[host]; ok {
 		return

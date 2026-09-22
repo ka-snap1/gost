@@ -25,49 +25,70 @@ import (
 	"testing"
 )
 
+// Both variants include the same public-operation locking boundary.
+var batchVariants = []struct {
+	name string
+	add  func(*Consistent, []string)
+}{
+	{"AddBatch", (*Consistent).AddBatch},
+	{"AddBatchMerge", func(c *Consistent, hosts []string) {
+		if len(hosts) == 0 {
+			return
+		}
+		c.Lock()
+		defer c.Unlock()
+		c.addBatchMerge(hosts)
+	}},
+}
+
 func TestAddBatchMatchesSequentialAdd(t *testing.T) {
-	large := make([]string, 256)
-	for i := range large {
-		large[i] = fmt.Sprintf("host-%d", i)
-	}
-	tests := []struct {
-		name    string
-		opts    []Option
-		initial []string
-		batches [][]string
-	}{
-		{name: "empty", batches: [][]string{nil, {}}},
-		{name: "single", batches: [][]string{{"a"}}},
-		{name: "multiple", batches: [][]string{{"a", "b", "c"}}},
-		{name: "duplicates", batches: [][]string{{"a", "b", "a", "c", "b"}}},
-		{name: "existing_loads", initial: []string{"a", "b"}, batches: [][]string{nil, {}, {"b", "c", "a", "d"}, {"a", "b", "c", "d"}}},
-		{name: "repeated_batch", batches: [][]string{{"a", "b"}, {"a", "b"}}},
-		{name: "split_batches", batches: [][]string{{"a", "b"}, {"b", "c"}, {"d", "a"}}},
-		{name: "single_replica", opts: []Option{WithReplicaNum(1)}, batches: [][]string{{"a", "b", "c"}}},
-		{name: "custom_hash", opts: []Option{WithReplicaNum(13), WithMaxVnodeNum(1023), WithHashFunc(murmurHash)}, batches: [][]string{{"a", "b", "c"}}},
-		{name: "small_bucket_space", opts: []Option{WithMaxVnodeNum(7)}, batches: [][]string{{"a", "b", "c"}, {"d", "a"}}},
-		{name: "forced_collision", opts: []Option{WithReplicaNum(3), WithHashFunc(func([]byte) uint64 { return 7 })}, batches: [][]string{{"a", "b", "a"}, {"c", "b"}}},
-		{name: "large", batches: [][]string{large}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sequential := NewConsistentHash(tt.opts...)
-			batch := NewConsistentHash(tt.opts...)
-			for i, host := range tt.initial {
-				sequential.Add(host)
-				batch.Add(host)
-				sequential.UpdateLoad(host, int64(i+1))
-				batch.UpdateLoad(host, int64(i+1))
+	for _, variant := range batchVariants {
+		t.Run(variant.name, func(t *testing.T) {
+			large := make([]string, 256)
+			for i := range large {
+				large[i] = fmt.Sprintf("host-%d", i)
 			}
-			for i, hosts := range tt.batches {
-				t.Run(fmt.Sprintf("batch_%d", i), func(t *testing.T) {
-					for _, host := range hosts {
+			tests := []struct {
+				name    string
+				opts    []Option
+				initial []string
+				batches [][]string
+			}{
+				{name: "empty", batches: [][]string{nil, {}}},
+				{name: "single", batches: [][]string{{"a"}}},
+				{name: "multiple", batches: [][]string{{"a", "b", "c"}}},
+				{name: "duplicates", batches: [][]string{{"a", "b", "a", "c", "b"}}},
+				{name: "existing_loads", initial: []string{"a", "b"}, batches: [][]string{nil, {}, {"b", "c", "a", "d"}, {"a", "b", "c", "d"}}},
+				{name: "repeated_batch", batches: [][]string{{"a", "b"}, {"a", "b"}}},
+				{name: "split_batches", batches: [][]string{{"a", "b"}, {"b", "c"}, {"d", "a"}}},
+				{name: "single_replica", opts: []Option{WithReplicaNum(1)}, batches: [][]string{{"a", "b", "c"}}},
+				{name: "custom_hash", opts: []Option{WithReplicaNum(13), WithMaxVnodeNum(1023), WithHashFunc(murmurHash)}, batches: [][]string{{"a", "b", "c"}}},
+				{name: "small_bucket_space", opts: []Option{WithMaxVnodeNum(7)}, batches: [][]string{{"a", "b", "c"}, {"d", "a"}}},
+				{name: "forced_collision", opts: []Option{WithReplicaNum(3), WithHashFunc(func([]byte) uint64 { return 7 })}, batches: [][]string{{"a", "b", "a"}, {"c", "b"}}},
+				{name: "large", batches: [][]string{large}},
+			}
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					sequential := NewConsistentHash(tt.opts...)
+					batch := NewConsistentHash(tt.opts...)
+					for i, host := range tt.initial {
 						sequential.Add(host)
+						batch.Add(host)
+						sequential.UpdateLoad(host, int64(i+1))
+						batch.UpdateLoad(host, int64(i+1))
 					}
-					batch.AddBatch(hosts)
-					assertBatchRingEquivalent(t, sequential, batch)
+					for i, hosts := range tt.batches {
+						t.Run(fmt.Sprintf("batch_%d", i), func(t *testing.T) {
+							for _, host := range hosts {
+								sequential.Add(host)
+							}
+							variant.add(batch, hosts)
+							assertBatchRingEquivalent(t, sequential, batch)
+						})
+					}
 				})
 			}
+
 		})
 	}
 }
@@ -134,76 +155,109 @@ func assertBatchRingEquivalent(t *testing.T, want, got *Consistent) {
 }
 
 func TestAddBatchConcurrentReads(t *testing.T) {
-	got := NewConsistentHash()
-	want := NewConsistentHash()
-	got.Add("seed")
-	want.Add("seed")
-	got.UpdateLoad("seed", 5)
-	want.UpdateLoad("seed", 5)
+	for _, variant := range batchVariants {
+		t.Run(variant.name, func(t *testing.T) {
+			got := NewConsistentHash()
+			want := NewConsistentHash()
+			got.Add("seed")
+			want.Add("seed")
+			got.UpdateLoad("seed", 5)
+			want.UpdateLoad("seed", 5)
 
-	const readers = 4
-	for round := 0; round < 16; round++ {
-		hosts := []string{"seed"}
-		for i := 0; i < 8; i++ {
-			hosts = append(hosts, fmt.Sprintf("host-%d-%d", round, i))
-		}
-		for _, host := range hosts {
-			want.Add(host)
-		}
-		// Build an immutable set before starting workers. Queries may return
-		// hosts from either side of the batch, but never an unknown host.
-		allowed := make(map[string]bool)
-		for _, host := range want.Members() {
-			allowed[host] = true
-		}
-		start := make(chan struct{})
-		var ready, done sync.WaitGroup
-		ready.Add(readers + 1)
-		done.Add(readers + 1)
-		for reader := 0; reader < readers; reader++ {
-			go func(reader int) {
-				defer done.Done()
-				ready.Done()
-				<-start
-				for i := 0; i < 100; i++ {
-					key := fmt.Sprintf("reader-%d-key-%d", reader, i)
-					host, err := got.Get(key)
-					if err != nil || !allowed[host] {
-						t.Errorf("Get(%q) = (%q, %v)", key, host, err)
-						return
-					}
-					h := got.Hash(key)
-					host, err = got.GetHash(h)
-					if err != nil || !allowed[host] {
-						t.Errorf("GetHash(%d) = (%q, %v)", h, host, err)
-						return
-					}
+			const readers = 4
+			for round := 0; round < 16; round++ {
+				hosts := []string{"seed"}
+				for i := 0; i < 8; i++ {
+					hosts = append(hosts, fmt.Sprintf("host-%d-%d", round, i))
 				}
-			}(reader)
-		}
-		go func() {
-			defer done.Done()
-			ready.Done()
-			<-start
-			got.AddBatch(hosts)
-		}()
-		ready.Wait()
-		close(start)
-		done.Wait()
-		// Internal maps are inspected only after all workers have stopped.
-		assertBatchRingEquivalent(t, want, got)
+				for _, host := range hosts {
+					want.Add(host)
+				}
+				// Build an immutable set before starting workers. Queries may return
+				// hosts from either side of the batch, but never an unknown host.
+				allowed := make(map[string]bool)
+				for _, host := range want.Members() {
+					allowed[host] = true
+				}
+				start := make(chan struct{})
+				var ready, done sync.WaitGroup
+				ready.Add(readers + 1)
+				done.Add(readers + 1)
+				for reader := 0; reader < readers; reader++ {
+					go func(reader int) {
+						defer done.Done()
+						ready.Done()
+						<-start
+						for i := 0; i < 100; i++ {
+							key := fmt.Sprintf("reader-%d-key-%d", reader, i)
+							host, err := got.Get(key)
+							if err != nil || !allowed[host] {
+								t.Errorf("Get(%q) = (%q, %v)", key, host, err)
+								return
+							}
+							h := got.Hash(key)
+							host, err = got.GetHash(h)
+							if err != nil || !allowed[host] {
+								t.Errorf("GetHash(%d) = (%q, %v)", h, host, err)
+								return
+							}
+						}
+					}(reader)
+				}
+				go func() {
+					defer done.Done()
+					ready.Done()
+					<-start
+					variant.add(got, hosts)
+				}()
+				ready.Wait()
+				close(start)
+				done.Wait()
+				// Internal maps are inspected only after all workers have stopped.
+				assertBatchRingEquivalent(t, want, got)
+			}
+
+		})
 	}
 }
 
 func TestAddBatchCollisionOrder(t *testing.T) {
-	c := NewConsistentHash(WithHashFunc(func([]byte) uint64 { return 7 }))
-	c.AddBatch([]string{"a", "b", "a"})
-	if len(c.circle) != 1 || !slices.Equal(c.sortedHashes, hashArray{7}) || c.circle[7] != "b" {
-		t.Fatalf("expected one position owned by b, got circle=%v, hashes=%v", c.circle, c.sortedHashes)
+	for _, variant := range batchVariants {
+		t.Run(variant.name, func(t *testing.T) {
+			c := NewConsistentHash(WithHashFunc(func([]byte) uint64 { return 7 }))
+			variant.add(c, []string{"a", "b", "a"})
+			if len(c.circle) != 1 || !slices.Equal(c.sortedHashes, hashArray{7}) || c.circle[7] != "b" {
+				t.Fatalf("expected one position owned by b, got circle=%v, hashes=%v", c.circle, c.sortedHashes)
+			}
+			c.UpdateLoad("b", 5)
+			variant.add(c, []string{"c", "b"})
+			if c.circle[7] != "c" || len(c.loadMap) != 3 || c.loadMap["b"].Load != 5 || c.totalLoad != 5 {
+				t.Fatalf("unexpected state after second batch: circle=%v, loads=%v, total=%d", c.circle, c.GetLoads(), c.totalLoad)
+			}
+
+		})
 	}
-	c.UpdateLoad("b", 5)
-	c.AddBatch([]string{"c", "b"})
-	if c.circle[7] != "c" || len(c.loadMap) != 3 || c.loadMap["b"].Load != 5 || c.totalLoad != 5 {
-		t.Fatalf("unexpected state after second batch: circle=%v, loads=%v, total=%d", c.circle, c.GetLoads(), c.totalLoad)
+}
+
+func TestAddBatchMergePositions(t *testing.T) {
+	positions := map[string]uint64{"0a": 20, "0b": 60, "0c": 10, "0d": 40, "0e": 80, "0f": 40}
+	opts := []Option{WithReplicaNum(1), WithHashFunc(func(key []byte) uint64 { return positions[string(key)] })}
+	for _, variant := range batchVariants {
+		t.Run(variant.name, func(t *testing.T) {
+			got, want := NewConsistentHash(opts...), NewConsistentHash(opts...)
+			for _, h := range []string{"a", "b"} {
+				got.Add(h)
+				want.Add(h)
+			}
+			hosts := []string{"c", "d", "e", "f", "d"}
+			for _, h := range hosts {
+				want.Add(h)
+			}
+			variant.add(got, hosts)
+			assertBatchRingEquivalent(t, want, got)
+			if !slices.Equal(got.sortedHashes, hashArray{10, 20, 40, 60, 80}) || got.circle[40] != "f" {
+				t.Fatalf("unexpected merged index or ownership: %v, %v", got.sortedHashes, got.circle)
+			}
+		})
 	}
 }
