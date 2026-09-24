@@ -24,11 +24,16 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+)
 
+import (
 	"github.com/pkg/errors"
-	"golang.org/x/crypto/blake2b"
 
-	gxstrings "github.com/dubbogo/gost/strings"
+	"golang.org/x/crypto/blake2b"
+)
+
+import (
+	"github.com/dubbogo/gost/strings"
 )
 
 const (
