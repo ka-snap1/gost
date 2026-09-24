@@ -20,20 +20,15 @@ package consistent
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
-)
 
-import (
-	"github.com/pkg/errors"
-
-	"golang.org/x/crypto/blake2b"
-)
-
-import (
 	"github.com/dubbogo/gost/strings"
+	"github.com/pkg/errors"
+	"golang.org/x/crypto/blake2b"
 )
 
 const (
@@ -212,7 +207,7 @@ func (c *Consistent) addBatchMerge(hosts []string) {
 	if len(added) == 0 {
 		return
 	}
-	sort.Sort(added)
+	slices.Sort(added)
 	old := c.sortedHashes
 	if len(old) == 0 {
 		c.sortedHashes = added
