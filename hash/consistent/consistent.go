@@ -208,26 +208,32 @@ func (c *Consistent) addBatchMerge(hosts []string) {
 		return
 	}
 	slices.Sort(added)
-	old := c.sortedHashes
-	if len(old) == 0 {
+	if len(c.sortedHashes) == 0 {
 		c.sortedHashes = added
 		return
 	}
-	// Use a separate array so writes cannot overwrite unread old positions.
-	merged := make(hashArray, 0, len(old)+len(added))
-	i, j := 0, 0
-	for i < len(old) && j < len(added) {
-		if old[i] < added[j] {
-			merged = append(merged, old[i])
-			i++
+	oldLen := len(c.sortedHashes)
+	addedLen := len(added)
+	hashes := slices.Grow(c.sortedHashes, addedLen)
+	hashes = hashes[:oldLen+addedLen]
+	i := oldLen - 1
+	j := addedLen - 1
+	k := len(hashes) - 1
+
+	for i >= 0 && j >= 0 {
+		if hashes[i] > added[j] {
+			hashes[k] = hashes[i]
+			i--
 		} else {
-			merged = append(merged, added[j])
-			j++
+			hashes[k] = added[j]
+			j--
 		}
+		k--
 	}
-	merged = append(merged, old[i:]...)
-	merged = append(merged, added[j:]...)
-	c.sortedHashes = merged
+	if j >= 0 {
+		copy(hashes[:j+1], added[:j+1])
+	}
+	c.sortedHashes = hashes
 }
 
 func (c *Consistent) add(host string) {
