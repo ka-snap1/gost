@@ -100,3 +100,42 @@ func BenchmarkBatchAppend(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkRemoveBatch(b *testing.B) {
+	for _, size := range []int{256, 1024} {
+		for _, replicas := range []int{10, 100} {
+			hosts := make([]string, size)
+			for i := range hosts {
+				hosts[i] = fmt.Sprintf("host-%d", i)
+			}
+			for _, count := range []int{1, 32, size} {
+				name := fmt.Sprintf("hosts=%d/replicas=%d/remove=%d", size, replicas, count)
+				b.Run(name, func(b *testing.B) {
+					for _, batch := range []bool{false, true} {
+						label := "Remove"
+						if batch {
+							label = "RemoveBatch"
+						}
+						b.Run(label, func(b *testing.B) {
+							b.ReportAllocs()
+							for b.Loop() {
+								b.StopTimer()
+								c := NewConsistentHash(WithReplicaNum(replicas))
+								c.AddBatch(hosts)
+								b.StartTimer()
+								if batch {
+									c.RemoveBatch(hosts[:count])
+								} else {
+									for _, h := range hosts[:count] {
+										c.Remove(h)
+									}
+								}
+								benchmarkRingHash = c
+							}
+						})
+					}
+				})
+			}
+		}
+	}
+}

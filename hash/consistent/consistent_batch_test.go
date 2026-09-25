@@ -261,3 +261,136 @@ func TestAddBatchMergePositions(t *testing.T) {
 		})
 	}
 }
+
+func TestRemoveBatchMatchesSequentialRemove(t *testing.T) {
+	for _, collision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("collisions=%t", collision), func(t *testing.T) {
+			for _, tc := range []struct {
+				name    string
+				initial []string
+				batches [][]string
+			}{
+				{"empty_ring", nil, [][]string{nil, {}, {"missing"}}},
+				{"empty_input", []string{"a", "b"}, [][]string{nil, {}}},
+				{"missing", []string{"a", "b"}, [][]string{{"missing"}}},
+				{"duplicates", []string{"a", "b", "c"}, [][]string{{"a", "a", "missing"}, {"a"}}},
+				{"all", []string{"a", "b", "c"}, [][]string{{"c", "b", "a"}, {"c"}}},
+				{"split", []string{"a", "b", "c", "d"}, [][]string{{"a", "c"}, {"d"}, {"b"}}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					opts := []Option{WithReplicaNum(13)}
+					if collision {
+						opts = append(opts, WithMaxVnodeNum(7))
+					}
+					want, got := NewConsistentHash(opts...), NewConsistentHash(opts...)
+					for i, h := range tc.initial {
+						want.Add(h)
+						got.Add(h)
+						want.UpdateLoad(h, int64(i+1))
+						got.UpdateLoad(h, int64(i+1))
+					}
+					for _, hosts := range tc.batches {
+						for _, h := range hosts {
+							want.Remove(h)
+						}
+						got.RemoveBatch(hosts)
+						assertBatchRingEquivalent(t, want, got)
+					}
+					// Verify subsequent additions also work with the compacted index.
+					want.Add("new")
+					got.AddBatch([]string{"new"})
+					assertBatchRingEquivalent(t, want, got)
+				})
+			}
+		})
+	}
+}
+
+func TestRemoveBatchLegacyCollisionSemantics(t *testing.T) {
+	for _, batch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("batch=%t", batch), func(t *testing.T) {
+			c := NewConsistentHash(WithHashFunc(func([]byte) uint64 { return 7 }))
+			c.AddBatch([]string{"a", "b"})
+			c.UpdateLoad("a", 3)
+			c.UpdateLoad("b", 5)
+			remove := func(hosts []string) {
+				if batch {
+					c.RemoveBatch(hosts)
+				} else {
+					for _, h := range hosts {
+						c.Remove(h)
+					}
+				}
+			}
+			// Legacy Remove deletes a colliding position even for an absent host.
+			remove([]string{"missing"})
+			if len(c.circle) != 0 || len(c.sortedHashes) != 0 || len(c.loadMap) != 2 || c.totalLoad != 8 {
+				t.Fatalf("missing-host semantics differ: circle=%v loads=%v total=%d", c.circle, c.GetLoads(), c.totalLoad)
+			}
+			// Recreate the shared position, then remove a different existing owner.
+			c.Add("c")
+			remove([]string{"a", "a"})
+			if len(c.circle) != 0 || len(c.sortedHashes) != 0 || len(c.loadMap) != 2 || c.totalLoad != 5 {
+				t.Fatalf("collision or duplicate semantics differ: circle=%v loads=%v total=%d", c.circle, c.GetLoads(), c.totalLoad)
+			}
+			remove([]string{"c"})
+			remove([]string{"b", "b"})
+			if len(c.circle) != 0 || len(c.sortedHashes) != 0 || len(c.loadMap) != 0 || c.totalLoad != 0 {
+				t.Fatal("ring not empty after deleting all hosts")
+			}
+			if _, err := c.Get("key"); err != ErrNoHosts {
+				t.Fatalf("want ErrNoHosts, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRemoveBatchConcurrentReads(t *testing.T) {
+	got, want := NewConsistentHash(), NewConsistentHash()
+	hosts := make([]string, 128)
+	for i := range hosts {
+		hosts[i] = fmt.Sprintf("host-%d", i)
+		got.Add(hosts[i])
+		want.Add(hosts[i])
+	}
+	allowed := make(map[string]bool)
+	for _, h := range hosts {
+		allowed[h] = true
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for reader := 0; reader < 4; reader++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 500; i++ {
+				key := fmt.Sprintf("key-%d", i)
+				h, err := got.Get(key)
+				if err != nil || !allowed[h] {
+					t.Errorf("Get returned %q, %v", h, err)
+					return
+				}
+				h, err = got.GetHash(got.Hash(key))
+				if err != nil || !allowed[h] {
+					t.Errorf("GetHash returned %q, %v", h, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 120; i += 8 {
+			got.RemoveBatch(hosts[i : i+8])
+		}
+	}()
+	close(start)
+	wg.Wait()
+	for _, h := range hosts[:120] {
+		want.Remove(h)
+	}
+	assertBatchRingEquivalent(t, want, got)
+}

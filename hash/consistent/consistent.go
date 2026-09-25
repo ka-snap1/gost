@@ -487,6 +487,48 @@ func (c *Consistent) remove(host string) bool {
 	return true
 }
 
+// RemoveBatch has the same final-state semantics as sequential Remove calls.
+// Like Remove, it deletes computed positions regardless of their current owner,
+// even for missing hosts. It holds one write lock and compacts the index once.
+func (c *Consistent) RemoveBatch(hosts []string) {
+	if len(hosts) == 0 {
+		return
+	}
+	c.Lock()
+	defer c.Unlock()
+	c.removeBatch(hosts)
+}
+
+// removeBatch requires the caller to hold the write lock.
+func (c *Consistent) removeBatch(hosts []string) {
+	changed := false
+	for _, host := range hosts {
+		for i := uint32(0); i < c.replicaFactor; i++ {
+			pos := c.Hash(c.eltKey(host, int(i)))
+			if _, exists := c.circle[pos]; exists {
+				delete(c.circle, pos)
+				changed = true
+			}
+		}
+		if h, exists := c.loadMap[host]; exists {
+			atomic.AddInt64(&c.totalLoad, -h.Load)
+			delete(c.loadMap, host)
+		}
+	}
+	if !changed {
+		return
+	}
+	// circle already records the surviving positions, so no deletion set is needed.
+	write := 0
+	for _, pos := range c.sortedHashes {
+		if _, exists := c.circle[pos]; exists {
+			c.sortedHashes[write] = pos
+			write++
+		}
+	}
+	c.sortedHashes = c.sortedHashes[:write]
+}
+
 // Hosts Return the list of hosts in the ring
 func (c *Consistent) Hosts() []string {
 	c.RLock()
